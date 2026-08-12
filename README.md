@@ -22,11 +22,15 @@ out.
 
 ## Quick start
 
-1. **[Download `SophosAutoLogin.exe`](https://github.com/rookiemaniesh/sophos-autologin/releases/latest/download/SophosAutoLogin.exe)** and run it. No installer, no admin rights.
-2. Type your campus username and password.
+1. **[Download `SophosAutoLogin.exe`](https://github.com/rookiemaniesh/sophos-autologin/releases/latest/download/SophosAutoLogin.exe)**, then **move it somewhere permanent** — `%LOCALAPPDATA%\Programs\SophosAutoLogin\` is a good spot. Not Downloads: the scheduled task remembers the path you registered it from, and Downloads is the folder that gets emptied.
+2. Run it. No installer, no admin rights. Type your campus username and password.
 3. Tick **Log in automatically when I connect**, then hit **Save**.
 
 That is the whole setup. Close the window — it keeps working in the background.
+
+If you do move the exe later, run it once from its new home and hit **Save**
+again to re-point the task. Do not use `--uninstall` for that — it deletes your
+stored password too.
 
 > **SmartScreen warning on first run?** Expected. The exe is not code-signed,
 > because a signing certificate costs a few hundred dollars a year. Click
