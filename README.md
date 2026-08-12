@@ -4,9 +4,9 @@
 
 **Stop typing your campus wifi password ten times a day.**
 
-Signs you in to a Sophos captive portal automatically, every time you connect —
-wifi or ethernet, on wake, on logon, and whenever the portal times your session
-out.
+Signs you in to a Sophos captive portal automatically — when you connect, when
+you log on, when the network comes back, and whenever the portal times your
+session out.
 
 [![Download SophosAutoLogin.exe](https://img.shields.io/badge/⬇%20Download-SophosAutoLogin.exe-2ea44f?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/rookiemaniesh/sophos-autologin/releases/latest/download/SophosAutoLogin.exe)
 
@@ -20,16 +20,26 @@ out.
 
 ---
 
+**Contents** · [Quick start](#quick-start) · [Is this safe?](#is-this-safe-where-does-my-password-go) ·
+[Features](#features) · [One login per account](#one-login-per-account) ·
+[When it cannot find the portal](#when-it-cannot-find-the-portal) ·
+[Troubleshooting](#troubleshooting) · [FAQ](#faq) ·
+[How it works](#how-it-works) · [Where everything lives](#where-everything-lives) ·
+[Command line](#command-line) · [Configuration](#configuration) ·
+[Building from source](#building-from-source) · [Compatibility](#compatibility)
+
+---
+
 ## Quick start
 
-1. **[Download `SophosAutoLogin.exe`](https://github.com/rookiemaniesh/sophos-autologin/releases/latest/download/SophosAutoLogin.exe)**, then **move it somewhere permanent** — `%LOCALAPPDATA%\Programs\SophosAutoLogin\` is a good spot. Not Downloads: the scheduled task remembers the path you registered it from, and Downloads is the folder that gets emptied.
+1. **[Download `SophosAutoLogin.exe`](https://github.com/rookiemaniesh/sophos-autologin/releases/latest/download/SophosAutoLogin.exe)**, then **move it somewhere permanent** — `%LOCALAPPDATA%\Programs\SophosAutoLogin\` is a good spot. **Not Downloads:** the scheduled task remembers the exact path you registered it from, and Downloads is the folder that gets emptied. Delete the file later and auto-login stops with no visible error.
 2. Run it. No installer, no admin rights. Type your campus username and password.
 3. Tick **Log in automatically when I connect**, then hit **Save**.
 
 That is the whole setup. Close the window — it keeps working in the background.
 
-If you do move the exe later, run it once from its new home and hit **Save**
-again to re-point the task. Do not use `--uninstall` for that — it deletes your
+Moving the exe afterwards? Run it once from its new home and hit **Save** again
+to re-point the task. Do *not* use `--uninstall` for that — it deletes your
 stored password too.
 
 > **SmartScreen warning on first run?** Expected. The exe is not code-signed,
@@ -41,75 +51,85 @@ stored password too.
 
 ## Is this safe? Where does my password go?
 
-**Short answer: your password is stored the same way Chrome stores your saved
-passwords, and it is never sent anywhere except your own campus portal.**
+**Short answer: your password is stored exactly the way Chrome stores your
+saved passwords, and it is never sent anywhere except your own campus portal.**
 
 | | |
 |---|---|
 | **Where it is stored** | **Windows Credential Manager**, under the service name `sophos-autologin` |
-| **How it is protected** | DPAPI — encrypted against your Windows user account, readable only when you are logged in as you |
+| **How it is protected** | DPAPI — encrypted against your Windows user account, readable only when you are signed in as you |
 | **Who else can read it** | Nobody. Not another user on the same PC, not a program running as someone else |
 | **Where it is *not* stored** | Not in the config file, not in the logs, not in this repository, not in any cloud |
-| **What is sent, and where** | Only your username and password, only to your campus portal's own IP address — the exact same request your browser makes when you log in on the portal page |
-| **Telemetry, analytics, servers** | None. There is no backend. This app talks to your gateway and to a Google connectivity-check URL to see whether you are online, and nothing else |
+| **Where your credentials are sent** | Only to your campus portal, and only its IP address on your own network — byte for byte the same form your browser submits on the portal page |
+| **What else it contacts** | Three connectivity probes, and nothing more: Google's `generate_204`, `1.1.1.1`, and a Microsoft connectivity-test IP. They carry no credentials and exist only to answer "am I online, or is something intercepting me?" |
+| **Telemetry, analytics, servers** | None. There is no backend. Nobody receives a single byte about you |
 
 This is the identical mechanism behind "Save password?" in Chrome and Edge:
 [`keyring`](https://pypi.org/project/keyring/) → Windows Credential Manager →
-DPAPI. You can see it yourself in *Control Panel → Credential Manager →
-Windows Credentials*.
+DPAPI. See it yourself in *Control Panel → Credential Manager → Windows
+Credentials*.
 
 Settings that are **not** secret — your username, the portal host — live in
 plain JSON at `%APPDATA%\SophosAutoLogin\config.json`.
 
 **To remove every trace:** `SophosAutoLogin.exe --uninstall` deletes the
-scheduled task and the stored password, then delete the
-`%APPDATA%\SophosAutoLogin` folder.
+scheduled task and the stored password; then delete the
+`%APPDATA%\SophosAutoLogin` folder and the exe.
+
+### You do not have to take my word for the binary
+
+The exe on the [Releases](https://github.com/rookiemaniesh/sophos-autologin/releases)
+page is built by **GitHub Actions from this repository**, by
+[`.github/workflows/release.yml`](.github/workflows/release.yml), on a runner
+nobody can reach into. The build log is public, the tests run before it, and
+`build.ps1` uses the same flags — so you can rebuild it yourself and compare.
 
 ### Being straight with you about the limits
 
 Two things this cannot fix, and no tool of this kind can:
 
 - **Sophos portals speak plain HTTP** (usually port 8090). Your password
-  crosses the local network unencrypted — but that is equally true when you
-  type it into the portal page in your browser. This app is no worse; it is
-  also no better.
+  crosses the local network unencrypted — equally true when you type it into
+  the portal page in your browser. This app is no worse; it is also no better.
 - **Anything running as *you* on your PC can ask Credential Manager for the
-  password.** That is how the store works, in Chrome too. It protects against
-  other people and other accounts, not against malware already running as you.
+  password.** That is how the store works, in Chrome too. It protects you from
+  other people and other accounts, not from malware already running as you.
 
-Every line of what happens to your credentials is in
-[`config.py`](sophos_autologin/config.py) — under 70 lines, and half of it is
-comments — and in [`portal.py`](sophos_autologin/portal.py). It is a short read.
+Everything that touches your credentials lives in
+[`config.py`](sophos_autologin/config.py) — under 70 lines, half of them
+comments — and [`portal.py`](sophos_autologin/portal.py). It is a short read.
 
 ---
 
 ## Features
 
-- **Finds the portal by itself.** Follows the captive-portal redirect — using
-  bare-IP probes too, since portals usually block DNS until you log in — then
-  falls back to probing your gateways and the network's DHCP/DNS servers, which
-  on a campus is very often the appliance itself. No SSID list to maintain,
-  works the same on wifi and ethernet.
-- **Knows a portal from a router.** An open port 80 is not enough to convince
-  it — a candidate has to answer with a Sophos/Cyberoam fingerprint. So it does
-  nothing at all on your home wifi.
-- **Three triggers**: on network-connect, at logon, and every few minutes to
+- **Finds the portal by itself.** Follows the captive-portal redirect — probing
+  bare IPs as well, since portals usually block DNS until you log in — then
+  falls back to your gateways and the network's DHCP/DNS servers, which on a
+  campus is very often the appliance itself. No SSID list to maintain; wifi and
+  ethernet work the same way.
+- **Knows a portal from a router.** An open port 80 convinces it of nothing —
+  a candidate must answer with a Sophos/Cyberoam fingerprint before it is
+  trusted with a login. So it does nothing at all on your home wifi.
+- **Three triggers:** on network-connect, at logon, and every few minutes to
   catch session timeouts.
-- **Handles one-session-per-account portals** — see below.
+- **Handles one-session-per-account portals** — [see below](#one-login-per-account).
 - **Backs off instead of locking you out.** Three rejected logins triggers a
   15-minute cooldown, so a changed password cannot get your account locked by a
   task retrying every three minutes forever.
-- **Diagnose button** that tells you exactly what is on your network when
-  something does not work.
-- **No admin rights, no service, no installer, no background process.** Just a
-  scheduled task that runs for a second and exits.
+- **Keeps the session alive** while you are online, so the portal is less
+  likely to time you out in the first place.
+- **Diagnose report** that tells you exactly what is on your network, and what
+  to do next, when something does not work.
+- **No admin rights, no installer, no service, nothing resident.** Just a
+  scheduled task that runs for a moment and exits.
 
 ---
 
 ## One login per account
 
-Plenty of campuses cap you to a single session per ID. When that cap is hit,
-the portal rejects the login with *"maximum login limit reached"* or *"you are
+Plenty of campuses cap you to a single session per ID. When that cap is hit the
+portal rejects the login with *"maximum login limit reached"* or *"you are
 already logged in"* — most often because your laptop dropped off the network
 without logging out and the portal is still holding the dead session.
 
@@ -133,9 +153,9 @@ recently to hold the connection.
 
 ## When it cannot find the portal
 
-Press **Diagnose**. It lists every gateway, which ports answer, which of those
-look like a real portal rather than a router's admin page, and what discovery
-settled on:
+Press **Diagnose**. It reports what each probe returned, every candidate host
+and where it came from, which ports answer, which of those look like a real
+portal rather than a router's admin page, and what discovery settled on:
 
 ```
 Sophos Auto Login — network report
@@ -148,10 +168,14 @@ Probes (does this network give the portal away?)
         DNS blocked (typical before you log in)
     http://1.1.1.1/
         redirected to 10.140.0.2:8090
+    http://204.79.197.200/
+        unreachable
 
 192.168.84.1  (gateway)
     :8090  closed
+    :8091  closed
     :80    OPEN — open, but no portal fingerprint
+    :443   closed
 
 10.140.0.2  (from the redirect)
     :8090  OPEN — looks like a portal
@@ -159,16 +183,24 @@ Probes (does this network give the portal away?)
 Discovery picked: 10.140.0.2:8090
 ```
 
-`SophosAutoLogin.exe --diagnose` does the same from the command line and writes
-the report to `%APPDATA%\SophosAutoLogin\diagnose.txt`. It takes up to a minute
-— it is knocking on every plausible door.
+`SophosAutoLogin.exe --diagnose` writes the same report to
+`%APPDATA%\SophosAutoLogin\diagnose.txt` and opens it. Add `--quiet` to skip
+opening it. Give it up to a minute — it is knocking on every plausible door,
+and a firewall that drops packets costs a timeout per port.
 
-**If it finds nothing, your portal is on a host nothing can guess** — it is
-frequently *not* your gateway. Open the portal in your browser, press F12, log
-in, and read the address of the login request in the Network tab. It looks like
-`http://10.140.0.2:8090/login.xml`. Put that host in **Portal host**; if the
-port is not 8090, set `portal_port` in `config.json`. A configured host is
-tried first, on whichever port answers.
+**If it finds nothing, your portal is on a host nothing can guess.** It is
+frequently *not* your gateway, and may not even be on your subnet. Open the
+portal in your browser, press F12, log in, and read the address of the login
+request in the Network tab. It looks like:
+
+```
+http://10.140.0.2:8090/login.xml
+mode=191&username=you&password=...&a=1786559177940&producttype=0
+```
+
+Put that host in **Portal host** and Save. If the port is not 8090, set
+`portal_port` in `config.json`. A configured host is tried first, on whichever
+port answers.
 
 ---
 
@@ -176,12 +208,40 @@ tried first, on whichever port answers.
 
 | Symptom | What it means |
 |---|---|
-| *"Nothing answered at `x.x.x.x:8090`"* | Discovery picked the wrong host or port. Run **Diagnose** and set **Portal host** / `portal_port` by hand. |
-| *"No captive portal on this network"* | Nothing portal-shaped is reachable. Normal at home. On campus it usually means the portal is on a host that cannot be guessed — find it with F12 as described above and set **Portal host**. |
-| Login fails with a credential error | Wrong username or password. Fix it in the window — three failures triggers a 15-minute cooldown, and saving a new password clears it on the next success. |
+| *"Nothing answered at `x.x.x.x:8090`"* | Discovery picked a host or port that is not listening. Run **Diagnose**, then set **Portal host** by hand. |
+| *"No captive portal on this network"* | Nothing portal-shaped is reachable. Normal at home. On campus it usually means the portal is on a host that cannot be guessed — find it with F12 as described above. |
+| Login rejected with a credential error | Wrong username or password. Fix it in the window. Three failures triggers a 15-minute cooldown; saving the right password clears it on the next success. |
 | It logs in, then drops a few minutes later | Another device is using the same ID. See [One login per account](#one-login-per-account). |
-| Nothing happens automatically | Check the task exists: `schtasks /Query /TN SophosAutoLogin`. Re-tick the autostart box and Save to re-register it. |
-| Want to see what it did | `%APPDATA%\SophosAutoLogin\autologin.log` |
+| Worked for weeks, then silently stopped | The exe was moved or deleted — most often it was sitting in Downloads. Put it back somewhere permanent, run it, and hit **Save** to re-register the task. |
+| Nothing happens automatically | `schtasks /Query /TN SophosAutoLogin /FO LIST /V` — check *Scheduled Task State* is Enabled, and that *Task To Run* points at a file that still exists. |
+| Want to see what it actually did | `%APPDATA%\SophosAutoLogin\autologin.log` |
+| Changed your campus password | Open the app, type the new one, Save. Do it before the task retries into the cooldown. |
+
+---
+
+## FAQ
+
+**Does it slow my PC down?**
+No. Nothing runs in the background. A scheduled task starts the exe, it works
+for a moment, and it exits.
+
+**Is it safe to leave enabled at home?**
+Yes — that is the point of the fingerprint check. On a network with no Sophos
+portal it finds nothing and exits without sending anything anywhere.
+
+**Can I run it on two devices with the same ID?**
+You can, but if your campus allows one session per account they will fight over
+it. See [One login per account](#one-login-per-account).
+
+**Does it work on ethernet?**
+Yes. The network-connect trigger fires for a cable being plugged in just as it
+does for wifi association.
+
+**Do I need to keep the window open?**
+No. Close it. The scheduled task is what does the work.
+
+**What happens when the portal is down?**
+The run fails, it logs why, and the next trigger tries again. Nothing breaks.
 
 ---
 
@@ -197,16 +257,36 @@ network connect / logon / every 3 min
      already online? ──yes──►  send keepalive, exit
             │ no
             ▼
-     find the portal   (redirect → gateway probe → fingerprint check)
+     find the portal
+       probes (redirect, incl. bare IPs)
+       → gateways
+       → DHCP/DNS servers
+       → fingerprint check before trusting any of them
             │
             ▼
      POST mode=191 with credentials from Credential Manager
             │
             ▼
-     verify by re-checking connectivity, log the result, exit
+     confirm by re-checking connectivity, log the result, exit
 ```
 
-The whole run takes about a second and leaves nothing resident.
+A run takes a second or two when the portal is where it was last time, and up
+to about ten seconds when it has to hunt for it. The task is capped at two
+minutes and runs hidden, as you, at normal privilege.
+
+---
+
+## Where everything lives
+
+| What | Where |
+|---|---|
+| The program | Wherever you put it — `%LOCALAPPDATA%\Programs\SophosAutoLogin\` recommended |
+| Your password | Windows Credential Manager, service `sophos-autologin` |
+| Settings | `%APPDATA%\SophosAutoLogin\config.json` |
+| Log | `%APPDATA%\SophosAutoLogin\autologin.log` (rotates at 256 KB, keeps 2) |
+| Failure/backoff state | `%APPDATA%\SophosAutoLogin\state.json` |
+| Diagnose report | `%APPDATA%\SophosAutoLogin\diagnose.txt` |
+| Scheduled task | `\SophosAutoLogin` — see it in Task Scheduler |
 
 ---
 
@@ -216,9 +296,12 @@ The whole run takes about a second and leaves nothing resident.
 |---|---|
 | *(no arguments)* | Opens the settings window |
 | `--run` | Logs in if needed, then exits. This is what the scheduled task calls. |
-| `--install` | Registers the scheduled task |
-| `--uninstall` | Removes the task and the stored password |
-| `--diagnose` | Writes a report on what is listening on this network |
+| `--install` | Registers the scheduled task, pointing at the exe you ran it from |
+| `--uninstall` | Removes the task **and deletes the stored password** |
+| `--diagnose` | Writes a network report and opens it |
+| `--diagnose --quiet` | Same, without opening it |
+
+Exit codes from `--run`: `0` online, `1` tried and failed, `2` nothing to do.
 
 ---
 
@@ -229,11 +312,11 @@ The whole run takes about a second and leaves nothing resident.
 | Key | Default | Meaning |
 |---|---|---|
 | `username` | `""` | Your campus login |
-| `portal_host` | `""` | Blank means auto-detect |
-| `portal_port` | `8090` | Starting point; discovery will try 8091, 80 and 443 too |
+| `portal_host` | `""` | Blank means auto-detect. Set it when auto-detect cannot find your portal |
+| `portal_port` | `8090` | Tried first; discovery also tries 8091, 80 and 443 |
 | `login_path` | `/login.xml` | Login endpoint |
 | `live_path` | `/live` | Keepalive endpoint |
-| `check_interval` | `180` | Seconds between scheduled runs |
+| `check_interval` | `180` | Seconds between scheduled runs. Re-save to apply |
 | `keepalive` | `true` | Ping the portal while online to hold the session |
 | `kick_other_session` | `false` | Drop an existing session when the portal says the account already has one |
 
@@ -247,7 +330,7 @@ cd sophos-autologin
 powershell -ExecutionPolicy Bypass -File build.ps1
 ```
 
-Output: `dist\SophosAutoLogin.exe`. Needs Python 3.11+.
+Output: `dist\SophosAutoLogin.exe`. Needs Python 3.11 or newer.
 
 Running without packaging:
 
@@ -259,19 +342,33 @@ python run.py --diagnose   # network report
 python run.py --uninstall  # remove task + credentials
 ```
 
-Tests — no network required, everything is stubbed:
+Tests — no network required, every socket and request is stubbed:
 
 ```powershell
 python tests\test_discovery.py       # portal discovery: 18 checks
 python tests\test_session_limit.py   # one-session handling: 10 checks
 ```
 
+Layout:
+
+```
+run.py                       PyInstaller entry point
+sophos_autologin/
+    __main__.py              argument handling
+    gui.py                   tkinter settings window (stdlib only)
+    portal.py                discovery, fingerprinting, login/logout/keepalive
+    runner.py                the headless --run path, backoff, logging
+    scheduler.py             scheduled task XML and schtasks calls
+    config.py                settings file and Credential Manager access
+```
+
 ---
 
 ## Compatibility
 
-Built against Sophos XG/UTM and Cyberoam portals using the `mode=191` login
-form (`/login.xml`, usually port 8090).
+Windows 10 and 11. Built against Sophos XG/UTM and Cyberoam portals using the
+`mode=191` login form (`/login.xml`, usually port 8090). Verified end to end
+against a live campus Cyberoam appliance.
 
 If your campus runs a different build: open the portal in your browser, press
 F12, log in, and read the Network tab for the real path and field names, then
