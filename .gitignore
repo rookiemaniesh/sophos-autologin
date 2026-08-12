@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+build/
+dist/
+*.spec
+*.spec.bak
+.venv/
+venv/
+config.json
+state.json
+*.log
+
+# Local editor/agent settings and the original hand-made archive
+.claude/
+sophos-autologin.zip
