@@ -15,19 +15,30 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 CONNECTIVITY_URL = "http://connectivitycheck.gstatic.com/generate_204"
 COMMON_PORTS = (8090, 8091, 80, 443)
+SCAN_TIMEOUT = 0.7        # per TCP connect while hunting for the portal
+
+# Probes used to make the network reveal the portal. The first needs DNS, which
+# many portals block until you log in — so the rest are bare IPs, which an
+# intercepting appliance still answers.
+PROBE_URLS = (
+    CONNECTIVITY_URL,
+    "http://1.1.1.1/",
+    "http://204.79.197.200/",     # msftconnecttest, by address
+)
+
+# Fingerprint of a Sophos/Cyberoam portal, used to tell one apart from a
+# router's own web UI on port 80. Deliberately narrow: a false positive here
+# sends someone's password to the wrong host.
+PORTAL_MARKERS = re.compile(
+    r"sophos|cyberoam|login\.xml|httpclient|mode=191|"
+    r"<\s*(requestresponse|liveuser|status)\b",
+    re.I,
+)
 
 # Portals capped at one session per account answer a second login with one of
 # these instead of a credential error. The account is fine; an older session —
 # usually this same machine before it dropped off the network — still holds the
 # slot, so the fix is to drop that session and log in again.
-# Fingerprint of a Sophos/Cyberoam portal page, used to tell one apart from a
-# router's own web UI on port 80.
-PORTAL_MARKERS = re.compile(
-    r"sophos|cyberoam|login\.xml|httpclient|mode=191|"
-    r"captive\s*portal|internet\s+access",
-    re.I,
-)
-
 SESSION_LIMIT_PATTERNS = (
     r"max.{0,20}(login|user|session).{0,20}limit",
     r"(login|session).{0,20}limit.{0,20}(reach|exceed)",
@@ -73,6 +84,49 @@ def default_gateways() -> list[str]:
     return gateways
 
 
+def _is_private(ip: str) -> bool:
+    if not re.fullmatch(r"\d+\.\d+\.\d+\.\d+", ip):
+        return False
+    a, b = (int(x) for x in ip.split(".")[:2])
+    return (a == 10 or (a == 172 and 16 <= b <= 31) or (a == 192 and b == 168)
+            or (a == 100 and 64 <= b <= 127))
+
+
+def infrastructure_hosts() -> list[str]:
+    """DHCP and DNS servers handed out by this network. On a campus the Sophos
+    appliance is usually one of them, and it is often not the gateway — which
+    is the case discovery otherwise has no way to solve. Read from the registry
+    rather than ipconfig, so the labels cannot change with the display
+    language."""
+    hosts: list[str] = []
+    try:
+        import winreg
+    except ImportError:
+        return hosts
+
+    key_path = r"SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces"
+    try:
+        root = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key_path)
+    except OSError:
+        return hosts
+
+    with root:
+        for i in range(winreg.QueryInfoKey(root)[0]):
+            try:
+                with winreg.OpenKey(root, winreg.EnumKey(root, i)) as iface:
+                    for name in ("DhcpServer", "DhcpNameServer", "NameServer"):
+                        try:
+                            value = str(winreg.QueryValueEx(iface, name)[0])
+                        except OSError:
+                            continue
+                        for ip in re.split(r"[ ,;]+", value):
+                            if _is_private(ip) and ip not in hosts:
+                                hosts.append(ip)
+            except OSError:
+                continue
+    return hosts
+
+
 def port_open(host: str, port: int, timeout: float = 1.5) -> bool:
     try:
         with socket.create_connection((host, port), timeout):
@@ -90,41 +144,73 @@ def _split_location(loc: str) -> tuple[str, int] | None:
     return host, int(port) if port else (443 if scheme == "https" else 80)
 
 
-def portal_from_redirect(timeout: float = 5.0) -> tuple[str, int] | None:
-    """A captive portal answers the 204 probe with a redirect to itself. The
-    Location header names the port as well, which is the only fully reliable
-    source for it — everything else is guesswork."""
+def probe(url: str, timeout: float = 4.0) -> tuple[str, tuple[str, int] | None]:
+    """Ask the network for a page it should not be able to serve. Returns a
+    human-readable note and, if the answer named a portal, its address."""
+    probe_host = re.sub(r"^https?://([^/:]+).*", r"\1", url)
     try:
-        r = requests.get(CONNECTIVITY_URL, timeout=timeout, allow_redirects=False)
+        r = requests.get(url, timeout=timeout, allow_redirects=False)
+    except requests.exceptions.ConnectionError as e:
+        if "NameResolutionError" in str(e) or "getaddrinfo" in str(e):
+            return "DNS blocked (typical before you log in)", None
+        return "unreachable", None
     except requests.RequestException:
-        return None
+        return "no answer", None
 
+    if r.status_code == 204:
+        return "got through — no interception here", None
+
+    hit = None
     if r.status_code in (301, 302, 303, 307, 308):
-        return _split_location(r.headers.get("Location", ""))
+        hit = _split_location(r.headers.get("Location", ""))
+        if hit and hit[0] == probe_host:
+            # http -> https on the same host is the site itself, not a portal.
+            return f"redirected to itself ({r.status_code})", None
+        if hit:
+            return f"redirected to {hit[0]}:{hit[1]}", hit
 
     if r.status_code == 200 and r.text:
         # Some portals answer 200 with a meta-refresh or a JS jump instead.
         m = re.search(r"""(?:url=|location(?:\.href)?\s*=\s*)['"]?"""
                       r"""(https?://[^\s'"<>]+)""", r.text[:4000], re.I)
-        if m:
-            return _split_location(m.group(1))
+        hit = _split_location(m.group(1)) if m else None
+        if hit and hit[0] != probe_host and looks_like_portal(*hit):
+            return f"page points at {hit[0]}:{hit[1]}", hit
+        return f"answered {r.status_code}, nothing portal-shaped in it", None
+
+    return f"answered {r.status_code}", None
+
+
+def portal_from_redirect(timeout: float = 4.0) -> tuple[str, int] | None:
+    """Whatever the probes reveal. A Location header is the one fully reliable
+    source for the portal's port — everything else is guesswork."""
+    for url in PROBE_URLS:
+        _, hit = probe(url, timeout)
+        if hit:
+            return hit
     return None
 
 
-def looks_like_portal(host: str, port: int, timeout: float = 4.0) -> bool:
+def looks_like_portal(host: str, port: int, timeout: float = 4.0,
+                      login_path: str = "/login.xml") -> bool:
     """An open port is not proof: every home router answers on 80, and this
     app running at home must not decide the router is a captive portal. Ask
-    for the page and look for the portal's fingerprint."""
-    try:
-        r = requests.get(f"http://{host}:{port}/", timeout=timeout,
-                         verify=False, allow_redirects=True)
-    except requests.RequestException:
-        return False
-    return bool(PORTAL_MARKERS.search(r.text[:20000]))
+    the login endpoint first — a real portal answers it with XML — then fall
+    back to the front page."""
+    for path in (login_path, "/"):
+        try:
+            r = requests.get(f"http://{host}:{port}{path}", timeout=timeout,
+                             verify=False, allow_redirects=True)
+        except requests.RequestException:
+            continue
+        if r.status_code < 400 and PORTAL_MARKERS.search(r.text[:20000]):
+            return True
+    return False
 
 
 def discover(configured_host: str = "",
-             port: int = 8090) -> tuple[str, int] | None:
+             port: int = 8090,
+             login_path: str = "/login.xml") -> tuple[str, int] | None:
     """Where the portal is, host *and* port. Returning the port matters: the
     caller must talk to the port that actually answered, not the one in the
     config."""
@@ -147,16 +233,26 @@ def discover(configured_host: str = "",
             if port_open(host, alt):
                 return host, alt
 
-    # Last resort: probe the gateways. 8090/8091 are portal ports and an open
-    # one is signal enough; 80 and 443 belong to every router alive, so a
-    # candidate found there has to prove what it is.
-    for gw in default_gateways():
-        for p in ports:
-            if not port_open(gw, p):
+    # Last resort: probe the gateways, then the DHCP/DNS servers. On a gateway,
+    # an open 8090/8091 is signal enough; 80 and 443 belong to every router
+    # alive. Anything else has to prove what it is on every port.
+    # A dropped packet costs the full timeout, and this runs every few minutes
+    # in the background, so keep the scan short: LAN hosts answer in
+    # milliseconds, and on a DHCP/DNS server only the portal ports are worth
+    # trying — its 80 and 443 are just an admin page.
+    gateways = default_gateways()
+    infra = [h for h in infrastructure_hosts() if h not in gateways]
+    portal_ports = tuple(p for p in ports if p not in (80, 443))
+
+    for host in gateways + infra:
+        for p in (ports if host in gateways else portal_ports):
+            if not port_open(host, p, timeout=SCAN_TIMEOUT):
                 continue
-            if p in (80, 443) and not looks_like_portal(gw, p):
+            trusted = host in gateways and p not in (80, 443)
+            if not trusted and not looks_like_portal(host, p,
+                                                     login_path=login_path):
                 continue
-            return gw, p
+            return host, p
     return None
 
 
@@ -164,42 +260,58 @@ def diagnostics(cfg: dict) -> str:
     """What this network actually looks like. For when discovery gets it wrong
     and the answer has to come from the person standing on the network."""
     port = int(cfg.get("portal_port", 8090))
+    login_path = cfg.get("login_path", "/login.xml")
     ports = tuple(dict.fromkeys((port, *COMMON_PORTS)))
     lines = ["Sophos Auto Login — network report", ""]
 
     lines.append(f"Internet reachable: {'yes' if is_online() else 'no'}")
 
-    hit = portal_from_redirect()
-    lines.append(f"Captive-portal redirect: "
-                 f"{hit[0] + ':' + str(hit[1]) if hit else 'none seen'}")
-
     configured = cfg.get("portal_host", "")
     lines.append(f"Portal host in settings: {configured or '(auto-detect)'}")
     lines.append("")
 
-    hosts = [h for h in ([configured] if configured else []) + \
-             ([hit[0]] if hit else []) + default_gateways() if h]
+    lines.append("Probes (does this network give the portal away?)")
+    hit = None
+    for url in PROBE_URLS:
+        note, found = probe(url)
+        lines.append(f"    {url}")
+        lines.append(f"        {note}")
+        hit = hit or found
+    lines.append("")
+
+    gateways = default_gateways()
+    infra = infrastructure_hosts()
+    hosts = [h for h in ([configured] if configured else []) +
+             ([hit[0]] if hit else []) + gateways + infra if h]
     seen: list[str] = []
     for host in hosts:
         if host in seen:
             continue
         seen.append(host)
-        lines.append(f"{host}")
+        role = ("configured" if host == configured else
+                "from the redirect" if hit and host == hit[0] else
+                "gateway" if host in gateways else "DHCP/DNS server")
+        lines.append(f"{host}  ({role})")
         for p in ports:
-            if not port_open(host, p):
+            if not port_open(host, p, timeout=SCAN_TIMEOUT):
                 lines.append(f"    :{p:<5} closed")
                 continue
-            marker = "looks like a portal" if looks_like_portal(host, p) \
-                else "open, but no portal fingerprint"
+            marker = "looks like a portal" if looks_like_portal(
+                host, p, login_path=login_path) else \
+                "open, but no portal fingerprint"
             lines.append(f"    :{p:<5} OPEN — {marker}")
         lines.append("")
 
-    found = discover(configured, port)
-    lines.append(f"Discovery picked: {found[0] + ':' + str(found[1]) if found else 'nothing'}")
+    found = discover(configured, port, login_path)
+    lines.append(f"Discovery picked: "
+                 f"{found[0] + ':' + str(found[1]) if found else 'nothing'}")
     lines.append("")
-    lines.append("If your portal is listed above on a port discovery did not")
-    lines.append("pick, put its address in Portal host and set portal_port in")
-    lines.append(r"%APPDATA%\SophosAutoLogin\config.json to match.")
+    lines.append("If nothing was found: the portal may live on a host this")
+    lines.append("machine has no way to guess — it is often not the gateway.")
+    lines.append("Open the portal in your browser, press F12, log in, and read")
+    lines.append("the address of the login request in the Network tab. Put that")
+    lines.append("host in Portal host, and its port in portal_port in")
+    lines.append(r"%APPDATA%\SophosAutoLogin\config.json.")
     return "\n".join(lines)
 
 
@@ -228,7 +340,8 @@ class Portal:
     def __init__(self, cfg: dict):
         self.cfg = cfg
         configured_port = int(cfg.get("portal_port", 8090))
-        found = discover(cfg.get("portal_host", ""), configured_port)
+        found = discover(cfg.get("portal_host", ""), configured_port,
+                         cfg.get("login_path", "/login.xml"))
         self.host, self.port = found or (None, configured_port)
 
     @property

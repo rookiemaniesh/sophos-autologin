@@ -81,9 +81,11 @@ comments — and in [`portal.py`](sophos_autologin/portal.py). It is a short rea
 
 ## Features
 
-- **Finds the portal by itself.** Follows the captive-portal redirect, and
-  falls back to probing your default gateways. No SSID list to maintain, works
-  the same on wifi and ethernet.
+- **Finds the portal by itself.** Follows the captive-portal redirect — using
+  bare-IP probes too, since portals usually block DNS until you log in — then
+  falls back to probing your gateways and the network's DHCP/DNS servers, which
+  on a campus is very often the appliance itself. No SSID list to maintain,
+  works the same on wifi and ethernet.
 - **Knows a portal from a router.** An open port 80 is not enough to convince
   it — a candidate has to answer with a Sophos/Cyberoam fingerprint. So it does
   nothing at all on your home wifi.
@@ -135,23 +137,34 @@ settled on:
 Sophos Auto Login — network report
 
 Internet reachable: no
-Captive-portal redirect: 10.140.0.1:8090
 Portal host in settings: (auto-detect)
 
-10.140.0.1
-    :8090  OPEN — looks like a portal
-    :8091  closed
-    :80    OPEN — open, but no portal fingerprint
-    :443   closed
+Probes (does this network give the portal away?)
+    http://connectivitycheck.gstatic.com/generate_204
+        DNS blocked (typical before you log in)
+    http://1.1.1.1/
+        redirected to 10.140.0.2:8090
 
-Discovery picked: 10.140.0.1:8090
+192.168.84.1  (gateway)
+    :8090  closed
+    :80    OPEN — open, but no portal fingerprint
+
+10.140.0.2  (from the redirect)
+    :8090  OPEN — looks like a portal
+
+Discovery picked: 10.140.0.2:8090
 ```
 
 `SophosAutoLogin.exe --diagnose` does the same from the command line and writes
-the report to `%APPDATA%\SophosAutoLogin\diagnose.txt`.
+the report to `%APPDATA%\SophosAutoLogin\diagnose.txt`. It takes up to a minute
+— it is knocking on every plausible door.
 
-If your portal shows up on a port that discovery skipped, put its address in
-**Portal host** and set `portal_port` in `config.json` to match.
+**If it finds nothing, your portal is on a host nothing can guess** — it is
+frequently *not* your gateway. Open the portal in your browser, press F12, log
+in, and read the address of the login request in the Network tab. It looks like
+`http://10.140.0.2:8090/login.xml`. Put that host in **Portal host**; if the
+port is not 8090, set `portal_port` in `config.json`. A configured host is
+tried first, on whichever port answers.
 
 ---
 
@@ -160,7 +173,7 @@ If your portal shows up on a port that discovery skipped, put its address in
 | Symptom | What it means |
 |---|---|
 | *"Nothing answered at `x.x.x.x:8090`"* | Discovery picked the wrong host or port. Run **Diagnose** and set **Portal host** / `portal_port` by hand. |
-| *"No captive portal on this network"* | Nothing portal-shaped is reachable. Normal at home; on campus, check you are actually associated with the wifi. |
+| *"No captive portal on this network"* | Nothing portal-shaped is reachable. Normal at home. On campus it usually means the portal is on a host that cannot be guessed — find it with F12 as described above and set **Portal host**. |
 | Login fails with a credential error | Wrong username or password. Fix it in the window — three failures triggers a 15-minute cooldown, and saving a new password clears it on the next success. |
 | It logs in, then drops a few minutes later | Another device is using the same ID. See [One login per account](#one-login-per-account). |
 | Nothing happens automatically | Check the task exists: `schtasks /Query /TN SophosAutoLogin`. Re-tick the autostart box and Save to re-register it. |
@@ -245,7 +258,7 @@ python run.py --uninstall  # remove task + credentials
 Tests — no network required, everything is stubbed:
 
 ```powershell
-python tests\test_discovery.py       # portal discovery: 13 checks
+python tests\test_discovery.py       # portal discovery: 18 checks
 python tests\test_session_limit.py   # one-session handling: 10 checks
 ```
 

@@ -160,7 +160,7 @@ class App(tk.Tk):
 
     def on_diagnose(self) -> None:
         def work() -> None:
-            self._set_status("Scanning this network…")
+            self._set_status("Scanning this network… (this can take a minute)")
             cfg = config.load() | {"portal_host": self.host_var.get().strip()}
             report = diagnostics(cfg)
             self.after(0, lambda: self._show_report(report))

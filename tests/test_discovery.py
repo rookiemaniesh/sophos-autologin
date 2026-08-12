@@ -12,6 +12,12 @@ from sophos_autologin import portal as P  # noqa: E402
 CFG = {"portal_host": "", "portal_port": 8090,
        "login_path": "/login.xml", "live_path": "/live"}
 
+# Net.install() monkeypatches these; the probe tests further down need the
+# real ones back.
+REAL = {name: getattr(P, name) for name in
+        ("port_open", "default_gateways", "portal_from_redirect",
+         "looks_like_portal", "requests")}
+
 
 class Net:
     """open_ports: {host: [ports]}; pages: {(host, port): html}."""
@@ -26,8 +32,8 @@ class Net:
         P.port_open = lambda h, p, timeout=1.5: p in self.open_ports.get(h, [])
         P.default_gateways = lambda: self.gateways
         P.portal_from_redirect = lambda timeout=5.0: self.redirect
-        P.looks_like_portal = lambda h, p, timeout=4.0: bool(
-            P.PORTAL_MARKERS.search(self.pages.get((h, p), "")))
+        P.looks_like_portal = lambda h, p, timeout=4.0, login_path="/login.xml": \
+            bool(P.PORTAL_MARKERS.search(self.pages.get((h, p), "")))
 
 
 def check(name, cond):
@@ -105,5 +111,67 @@ ok &= check("Location without a port defaults by scheme",
             P._split_location("https://portal.campus.edu/login")
             == ("portal.campus.edu", 443))
 ok &= check("garbage Location is ignored", P._split_location("") is None)
+
+
+# --------------------------------------------------------------- probes ---
+# The real network this was reported on: the portal is 192.168.0.2:8090 while
+# the gateway is 192.168.84.1, DNS is blocked before login, and nothing
+# redirects. Discovery cannot find that, and must say so rather than guess.
+
+for _name, _fn in REAL.items():
+    setattr(P, _name, _fn)
+
+
+class FakeResponse:
+    def __init__(self, status, headers=None, text=""):
+        self.status_code = status
+        self.headers = headers or {}
+        self.text = text
+
+
+def fake_requests(handler):
+    class FakeRequests:
+        RequestException = P.requests.RequestException
+        exceptions = P.requests.exceptions
+
+        @staticmethod
+        def get(url, **kw):
+            return handler(url)
+    P.requests = FakeRequests
+    return FakeRequests
+
+
+real_requests = REAL["requests"]
+
+# DNS blocked, no interception: probes must come back empty, not confused.
+def blocked(url):
+    if "gstatic" in url:
+        raise real_requests.exceptions.ConnectionError(
+            "NameResolutionError: getaddrinfo failed")
+    raise real_requests.exceptions.ConnectionError("timed out")
+
+
+fake_requests(blocked)
+ok &= check("blocked network reveals no portal", P.portal_from_redirect() is None)
+note, _ = P.probe("http://connectivitycheck.gstatic.com/generate_204")
+ok &= check("DNS failure is reported as such", "DNS blocked" in note)
+
+# 1.1.1.1 redirecting http->https on itself is not a portal.
+fake_requests(lambda url: FakeResponse(301, {"Location": "https://1.1.1.1/"}))
+note, hit = P.probe("http://1.1.1.1/")
+ok &= check("self-redirect is not mistaken for a portal",
+            hit is None and "itself" in note)
+
+# A real interception names the portal, port included.
+fake_requests(lambda url: FakeResponse(
+    302, {"Location": "http://192.168.0.2:8090/httpclient.html"}))
+ok &= check("intercepted probe yields host and port",
+            P.portal_from_redirect() == ("192.168.0.2", 8090))
+
+# Already online: the 204 gets through and nothing is claimed.
+fake_requests(lambda url: FakeResponse(204))
+ok &= check("a 204 means no portal here", P.portal_from_redirect() is None)
+
+P.requests = real_requests
 
 sys.exit(0 if ok else 1)
